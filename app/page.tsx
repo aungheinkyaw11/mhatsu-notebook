@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useTheme } from "next-themes";
@@ -26,12 +26,10 @@ import {
   Moon,
   Network,
   PanelLeft,
-  Plus,
   Presentation,
   RefreshCw,
   Search,
   Send,
-  Sparkles,
   Sun,
   Trash2,
   Upload,
@@ -68,7 +66,12 @@ type FullscreenTarget = HTMLElement & {
   webkitRequestFullscreen?: () => Promise<void> | void;
 };
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+if (typeof window !== "undefined") {
+  pdfjs.GlobalWorkerOptions.workerPort = new Worker(
+    new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url),
+    { type: "module" }
+  );
+}
 
 const prompts = [
   "Summarize these documents",
@@ -339,6 +342,7 @@ export default function Home() {
   const [isAnswering, setIsAnswering] = useState(false);
   const [activeStudyTool, setActiveStudyTool] = useState<StudyTool>("mindmap");
   const [studyArtifact, setStudyArtifact] = useState<StudyArtifact | null>(null);
+  const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [isGeneratingStudy, setIsGeneratingStudy] = useState(false);
   const [notice, setNotice] = useState("");
   const [isThemeMounted, setIsThemeMounted] = useState(false);
@@ -350,6 +354,7 @@ export default function Home() {
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [isFlashcardFlipped, setIsFlashcardFlipped] = useState(false);
   const [mindMapZoom, setMindMapZoom] = useState(1);
+  const [mindMapOffset, setMindMapOffset] = useState({ x: 0, y: 0 });
   const [slideIndex, setSlideIndex] = useState(0);
   const [mobileTab, setMobileTab] = useState<"sources" | "reader" | "chat">("reader");
   const readerRef = useRef<HTMLDivElement | null>(null);
@@ -358,6 +363,7 @@ export default function Home() {
   const pendingPageScrollRef = useRef<{ page: number; mode: "page" | "citation" } | null>(null);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const suppressScrollSyncUntilRef = useRef(0);
+  const mindMapDragRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
 
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId) ?? null;
   const selectedIsPdf = Boolean(selectedDocument?.name.toLowerCase().endsWith(".pdf") || selectedDocument?.type.includes("pdf"));
@@ -374,6 +380,11 @@ export default function Home() {
   const activeFlashcard = flashcards[flashcardIndex] ?? null;
   const slides = studyArtifact?.type === "slides" ? (studyArtifact.slides ?? []) : [];
   const activeSlide = slides[slideIndex] ?? null;
+  const mindMapNodes = studyArtifact?.type === "mindmap" ? (studyArtifact.mindMap ?? []).slice(0, 4) : [];
+  const mindMapRootTitle =
+    studyArtifact?.type === "mindmap"
+      ? studyArtifact.title.replace(/\s*mind\s*map\s*$/i, "").replace(/\s+/g, " ").trim()
+      : "";
   const trimmedApiKey = apiKey.trim();
   const keyLooksLikeGemini =
     !trimmedApiKey || trimmedApiKey.startsWith("AIza") || trimmedApiKey.startsWith("AQ.");
@@ -434,6 +445,7 @@ export default function Home() {
     setFlashcardIndex(0);
     setIsFlashcardFlipped(false);
     setSlideIndex(0);
+    setQuizAnswers({});
   }, [studyArtifact?.title, studyArtifact?.type]);
 
   useEffect(() => {
@@ -489,7 +501,7 @@ export default function Home() {
       for (const file of accepted) {
         const extension = file.name.split(".").pop()?.toLowerCase();
         if (!["pdf", "txt"].includes(extension ?? "")) {
-          setNotice("This file type is not supported yet. Please upload a PDF, TXT, or DOCX file.");
+          setNotice("This file type is not supported yet. Please upload a PDF or TXT file.");
           continue;
         }
 
@@ -558,7 +570,8 @@ export default function Home() {
       headers: {
         "Content-Type": "application/json",
         ...(trimmedApiKey ? { "x-gemini-api-key": trimmedApiKey } : {})
-      }
+      },
+      body: JSON.stringify({ model: chatModel })
     });
 
     setConnection(response.ok ? "connected" : "failed");
@@ -574,23 +587,6 @@ export default function Home() {
     setDocuments((current) => current.filter((candidate) => candidate.id !== documentId));
     setChunks((current) => current.filter((chunk) => chunk.documentId !== documentId));
     setSelectedDocumentId((current) => (current === documentId ? null : current));
-  };
-
-  const createNewNotebook = () => {
-    documents.forEach((document) => URL.revokeObjectURL(document.objectUrl));
-    setDocuments([]);
-    setChunks([]);
-    setSelectedDocumentId(null);
-    setQuery("");
-    setPageNumber(1);
-    setZoom(1);
-    setHighlightPage(null);
-    setPageNavigationMode("page");
-    setMessages([]);
-    setStudyArtifact(null);
-    setInput("");
-    setNotice("New notebook ready. Upload a PDF to start asking questions.");
-    setMobileTab("sources");
   };
 
   const jumpToCitation = (citation: Citation) => {
@@ -755,7 +751,10 @@ export default function Home() {
         body: JSON.stringify({ question, chunks: retrieved, model: chatModel })
       });
 
-      if (!response.ok) throw new Error("Gemini chat generation failed");
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        throw new Error(errorText || "Gemini chat generation failed");
+      }
       if (!response.body) throw new Error("No response body");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -795,13 +794,17 @@ export default function Home() {
             : message
         )
       );
-    } catch {
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : "I could not generate an answer from Gemini. Try Gemini 2.5 Flash or check your API quota.";
       setMessages((current) =>
         current.map((message) =>
           message.id === answerId
             ? {
                 ...message,
-                content: "I could not generate an answer from Gemini. Try Gemini 2.5 Flash or check your API quota.",
+                content: errorMessage,
                 citations: []
               }
             : message
@@ -857,8 +860,8 @@ export default function Home() {
     <aside className="flex h-full min-h-0 flex-col border-r bg-card/80 backdrop-blur-xl">
       <div className="flex items-center justify-between px-5 py-4">
         <div className="flex items-center gap-3">
-          <div className="brand-mark flex h-10 w-10 items-center justify-center rounded-lg text-primary-foreground shadow-sm">
-            <Sparkles className="h-4 w-4" />
+          <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border bg-white shadow-sm">
+            <img src="/mhatsu-logo.png" alt="MhatSu" className="h-full w-full object-cover" />
           </div>
           <div>
             <div className="wordmark text-base font-semibold tracking-tight">MhatSu</div>
@@ -871,11 +874,6 @@ export default function Home() {
       </div>
 
       <div className="space-y-4 px-4">
-        <Button className="w-full justify-start" variant="secondary" onClick={createNewNotebook}>
-          <Plus className="h-4 w-4" />
-          New Notebook
-        </Button>
-
         <label
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
@@ -885,7 +883,7 @@ export default function Home() {
           className="flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/70 px-4 py-6 text-center transition-colors hover:border-primary/50 hover:bg-accent/40"
         >
           <Upload className="mb-3 h-5 w-5 text-primary" />
-          <span className="text-sm font-medium">Drop PDFs here</span>
+          <span className="text-sm font-medium">Drop PDFs or TXT files here</span>
           <span className="mt-1 text-xs text-muted-foreground">or choose files to upload</span>
           <input
             type="file"
@@ -1023,7 +1021,7 @@ export default function Home() {
               )}
               {connection === "failed" && (
                 <p className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
-                  Gemini connection failed. Check your API key and try again.
+                  {notice || "Gemini connection failed. Check your API key and try again."}
                 </p>
               )}
               {connection === "connected" && (
@@ -1033,7 +1031,7 @@ export default function Home() {
               )}
             </div>
           </div>
-          {notice && <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">{notice}</p>}
+          {notice && connection !== "failed" && <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">{notice}</p>}
         </div>
       </div>
     </aside>
@@ -1044,8 +1042,8 @@ export default function Home() {
       <Button variant="ghost" size="icon-sm" onClick={() => setIsSourceCollapsed(false)} aria-label="Show sources">
         <PanelLeft className="h-4 w-4 rotate-180" />
       </Button>
-      <div className="brand-mark flex h-9 w-9 items-center justify-center rounded-lg text-primary-foreground shadow-sm">
-        <Sparkles className="h-4 w-4" />
+      <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-lg border bg-white shadow-sm">
+        <img src="/mhatsu-logo.png" alt="MhatSu" className="h-full w-full object-cover" />
       </div>
       <div className="h-px w-8 bg-border" />
       <div className="text-xs font-medium text-muted-foreground [writing-mode:vertical-rl]">Sources</div>
@@ -1261,6 +1259,38 @@ export default function Home() {
     if (sources?.[0]) jumpToCitation(sources[0]);
   };
 
+  const panMindMap = useCallback((left: number, top: number) => {
+    setMindMapOffset((current) => ({ x: current.x - left, y: current.y - top }));
+  }, []);
+
+  const startMindMapPan = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+    mindMapDragRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      offsetX: mindMapOffset.x,
+      offsetY: mindMapOffset.y
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [mindMapOffset.x, mindMapOffset.y]);
+
+  const moveMindMapPan = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const drag = mindMapDragRef.current;
+    if (!drag) return;
+    event.preventDefault();
+    setMindMapOffset({
+      x: drag.offsetX + event.clientX - drag.x,
+      y: drag.offsetY + event.clientY - drag.y
+    });
+  }, []);
+
+  const stopMindMapPan = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    mindMapDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   const exportSlidesMarkdown = () => {
     if (!slides.length) return;
     const markdown = slides
@@ -1333,110 +1363,203 @@ export default function Home() {
       {studyArtifact && !isGeneratingStudy && (
         <div className="space-y-3">
           {studyArtifact.type === "mindmap" && (
-            <div className="overflow-hidden rounded-xl border bg-[#1f2328] text-zinc-100 shadow-soft">
-              <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+            <div className="overflow-hidden rounded-lg border border-[#30363d] bg-[#1f2328] text-zinc-100 shadow-soft">
+              <div className="flex h-11 items-center justify-between border-b border-white/10 px-4">
                 <div className="text-sm text-zinc-300">Studio &gt; App</div>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   className="text-zinc-300 hover:bg-white/10 hover:text-white"
                   onClick={() => setIsFocusMode((current) => !current)}
+                  aria-label={isFocusMode ? "Exit focus mode" : "Enter focus mode"}
                 >
                   {isFocusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                 </Button>
               </div>
-              <div className="px-4 pt-4">
-                <div className="rounded-md border border-white/20 px-3 py-2 text-2xl font-medium tracking-tight text-white">
-                  {studyArtifact.title}
-                </div>
+
+              <div className="px-4 pt-5">
+                <h3 className="text-xl font-medium text-zinc-100">{mindMapRootTitle || studyArtifact.title}</h3>
                 <button
                   onClick={() => jumpToFirstSource(studyArtifact.mindMap?.[0]?.sources)}
-                  className="mt-2 rounded-full border border-white/10 px-4 py-2 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/10"
+                  className="mt-2 rounded-full border border-white/10 px-4 py-1.5 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/10"
                 >
                   View {studySourceCount || 1} source{(studySourceCount || 1) > 1 ? "s" : ""}
                 </button>
               </div>
 
-              <div className="relative h-[500px] overflow-hidden">
+              <div
+                className="relative h-[560px] cursor-grab overflow-hidden touch-none active:cursor-grabbing"
+                onPointerDown={startMindMapPan}
+                onPointerMove={moveMindMapPan}
+                onPointerUp={stopMindMapPan}
+                onPointerCancel={stopMindMapPan}
+                onPointerLeave={stopMindMapPan}
+              >
                 <div
-                  className="relative h-[500px] w-full origin-center transition-transform"
-                  style={{ transform: `scale(${mindMapZoom})` }}
+                  className="relative h-[680px] min-w-[1120px] origin-center"
+                  style={{ transform: `translate(${mindMapOffset.x}px, ${mindMapOffset.y}px) scale(${mindMapZoom})` }}
                 >
-                  <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 720 500" preserveAspectRatio="none">
-                    {(studyArtifact.mindMap ?? []).slice(0, 5).map((node, index, nodes) => {
-                      const y = 125 + index * (nodes.length > 3 ? 72 : 92);
+                  <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1120 680" preserveAspectRatio="none">
+                    {mindMapNodes.map((node, index, nodes) => {
+                      const primaryY = 160 + index * (nodes.length > 2 ? 120 : 136);
                       return (
                         <path
-                          key={node.title}
-                          d={`M 295 255 C 360 ${y}, 380 ${y}, 450 ${y}`}
+                          key={`root-${index}-${node.title}`}
+                          d={`M 292 354 C 346 ${primaryY + 29}, 370 ${primaryY + 29}, 430 ${primaryY + 29}`}
                           fill="none"
-                          stroke="#9ca3ff"
-                          strokeWidth="2.8"
+                          stroke="#9aa7ff"
+                          strokeWidth="2.4"
                           strokeLinecap="round"
                         />
                       );
                     })}
+                    {mindMapNodes.map((node, index, nodes) => {
+                      const children = (node.children?.length ? node.children : [{ title: node.summary, detail: node.summary, sources: node.sources }]).slice(0, 3);
+                      const primaryY = 160 + index * (nodes.length > 2 ? 120 : 136);
+                      return children.map((child, childIndex) => {
+                        const childY = primaryY + 29 + (childIndex - (children.length - 1) / 2) * 64;
+                        return (
+                          <path
+                            key={`child-line-${index}-${childIndex}-${child.title}`}
+                            d={`M 650 ${primaryY + 29} C 710 ${childY}, 730 ${childY}, 780 ${childY}`}
+                            fill="none"
+                            stroke="#9aa7ff"
+                            strokeWidth="2.1"
+                            strokeLinecap="round"
+                          />
+                        );
+                      });
+                    })}
                   </svg>
 
-                  <div className="absolute left-4 top-[220px] w-[250px] rounded-lg bg-[#575775] px-4 py-4 text-lg font-semibold leading-snug text-white shadow-lg">
-                    {studyArtifact.title.replace(/\s*mind\s*map\s*$/i, "")}
-                  </div>
-                  <div className="absolute left-[278px] top-[238px] flex h-9 w-9 items-center justify-center rounded-full bg-[#575775] text-xl font-bold text-white shadow">
+                  <button
+                    onClick={() => jumpToFirstSource(studyArtifact.mindMap?.[0]?.sources)}
+                    className="absolute left-6 top-[322px] flex h-16 w-[250px] items-center rounded-lg bg-[#5f607e] px-5 text-left text-lg font-semibold leading-tight text-white shadow-[0_18px_50px_rgba(0,0,0,0.25)] transition-colors hover:bg-[#696a8b]"
+                  >
+                    <span className="line-clamp-2">{mindMapRootTitle || studyArtifact.title}</span>
+                  </button>
+                  <button
+                    onClick={() => jumpToFirstSource(studyArtifact.mindMap?.[0]?.sources)}
+                    className="absolute left-[284px] top-[340px] flex h-8 w-8 items-center justify-center rounded-full bg-[#4a5563] text-base font-semibold text-zinc-100 shadow"
+                    aria-label="Open root source"
+                  >
                     &lt;
-                  </div>
+                  </button>
 
-                  {(studyArtifact.mindMap ?? []).slice(0, 5).map((node, index, nodes) => {
-                    const y = 92 + index * (nodes.length > 3 ? 72 : 92);
+                  {mindMapNodes.map((node, index, nodes) => {
+                    const primaryY = 160 + index * (nodes.length > 2 ? 120 : 136);
+                    const children = (node.children?.length ? node.children : [{ title: node.summary, detail: node.summary, sources: node.sources }]).slice(0, 3);
                     return (
-                      <div
-                        key={node.title}
-                        className="absolute right-4 flex items-center gap-2"
-                        style={{ top: y }}
-                      >
+                      <div key={`node-${index}-${node.title}`}>
                         <button
                           onClick={() => jumpToFirstSource(node.sources)}
-                          className="line-clamp-2 w-[260px] rounded-lg bg-[#3f4750] px-4 py-3 text-left text-base font-semibold leading-snug text-white shadow-lg transition-colors hover:bg-[#48525d]"
+                          className="absolute left-[430px] flex h-[58px] w-[220px] items-center rounded-lg bg-[#46515d] px-4 text-left text-base font-semibold leading-snug text-zinc-100 shadow-[0_14px_36px_rgba(0,0,0,0.22)] transition-colors hover:bg-[#515d6a]"
+                          style={{ top: primaryY }}
                         >
-                          {node.title}
+                          <span className="line-clamp-2">{node.title}</span>
                         </button>
                         <button
                           onClick={() => jumpToFirstSource(node.sources)}
-                          className="flex h-9 w-9 items-center justify-center rounded-full bg-[#3f4750] text-lg font-bold text-white"
+                          className="absolute left-[670px] flex h-8 w-8 items-center justify-center rounded-full bg-[#4a5563] text-base font-semibold text-zinc-100 shadow"
+                          style={{ top: primaryY + 13 }}
                           aria-label={`Open source for ${node.title}`}
                         >
                           &gt;
                         </button>
+
+                        {children.map((child, childIndex) => {
+                          const childY = primaryY + (childIndex - (children.length - 1) / 2) * 64;
+                          return (
+                            <button
+                              key={`leaf-${index}-${childIndex}-${child.title}`}
+                              onClick={() => jumpToFirstSource(child.sources)}
+                              className="absolute left-[780px] flex h-[58px] w-[270px] items-center rounded-lg bg-[#344d47] px-4 text-left text-base font-medium leading-snug text-zinc-100 shadow-[0_14px_36px_rgba(0,0,0,0.22)] transition-colors hover:bg-[#3d5a53]"
+                              style={{ top: childY }}
+                            >
+                              <span className="line-clamp-2">{child.title}</span>
+                            </button>
+                          );
+                        })}
                       </div>
                     );
                   })}
 
-                  <div className="absolute left-4 top-24 space-y-4">
-                    <div className="rounded-full border border-white/10 bg-transparent p-2">
-                      <ChevronLeft className="h-5 w-5 rotate-90 text-zinc-300" />
-                      <ChevronRight className="h-5 w-5 rotate-90 text-zinc-300" />
+                  {!mindMapNodes.length && (
+                    <div className="absolute left-6 top-[320px] max-w-md rounded-lg border border-white/10 bg-[#2d343c] px-4 py-3 text-sm text-zinc-300">
+                      Generate a mind map to populate this canvas.
                     </div>
-                    <div className="overflow-hidden rounded-full border border-white/10">
-                      <button
-                        onClick={() => setMindMapZoom((current) => Math.min(1.3, current + 0.08))}
-                        className="flex h-11 w-11 items-center justify-center text-2xl text-zinc-200 hover:bg-white/10"
-                      >
-                        +
-                      </button>
-                      <div className="h-px bg-white/10" />
-                      <button
-                        onClick={() => setMindMapZoom((current) => Math.max(0.72, current - 0.08))}
-                        className="flex h-11 w-11 items-center justify-center text-2xl text-zinc-200 hover:bg-white/10"
-                      >
-                        -
-                      </button>
-                    </div>
+                  )}
+                </div>
+
+                <div className="absolute bottom-6 right-6 flex flex-col items-center gap-3">
+                  <div className="grid grid-cols-3 gap-1 rounded-full border border-white/10 bg-[#242a31] p-1 shadow-lg">
+                    <span />
                     <button
-                      onClick={() => navigator.clipboard.writeText(JSON.stringify(studyArtifact, null, 2))}
-                      className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 text-zinc-200 hover:bg-white/10"
+                      onClick={() => panMindMap(0, -180)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-100 hover:bg-white/10"
+                      aria-label="Pan up"
                     >
-                      <Download className="h-5 w-5" />
+                      <ChevronLeft className="h-4 w-4 rotate-90" />
+                    </button>
+                    <span />
+                    <button
+                      onClick={() => panMindMap(-220, 0)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-100 hover:bg-white/10"
+                      aria-label="Pan left"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMindMapOffset({ x: 0, y: 0 });
+                        setMindMapZoom(1);
+                      }}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold text-zinc-100 hover:bg-white/10"
+                      aria-label="Reset mind map position"
+                    >
+                      1:1
+                    </button>
+                    <button
+                      onClick={() => panMindMap(220, 0)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-100 hover:bg-white/10"
+                      aria-label="Pan right"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                    <span />
+                    <button
+                      onClick={() => panMindMap(0, 180)}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-100 hover:bg-white/10"
+                      aria-label="Pan down"
+                    >
+                      <ChevronRight className="h-4 w-4 rotate-90" />
+                    </button>
+                    <span />
+                  </div>
+                  <div className="overflow-hidden rounded-full border border-white/10 bg-[#242a31] shadow-lg">
+                    <button
+                      onClick={() => setMindMapZoom((current) => Math.min(1.25, current + 0.08))}
+                      className="flex h-10 w-10 items-center justify-center text-xl text-zinc-100 hover:bg-white/10"
+                      aria-label="Zoom in"
+                    >
+                      +
+                    </button>
+                    <div className="h-px bg-white/10" />
+                    <button
+                      onClick={() => setMindMapZoom((current) => Math.max(0.76, current - 0.08))}
+                      className="flex h-10 w-10 items-center justify-center text-xl text-zinc-100 hover:bg-white/10"
+                      aria-label="Zoom out"
+                    >
+                      -
                     </button>
                   </div>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(JSON.stringify(studyArtifact, null, 2))}
+                    className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-[#242a31] text-zinc-100 shadow-lg hover:bg-white/10"
+                    aria-label="Copy mind map JSON"
+                  >
+                    <Download className="h-4 w-4" />
+                  </button>
                 </div>
               </div>
 
@@ -1550,28 +1673,68 @@ export default function Home() {
 
           {studyArtifact.type === "quiz" && (
             <div className="space-y-2">
-              {studyArtifact.quiz?.map((question, index) => (
-                <div key={`${question.question}-${index}`} className="rounded-lg border bg-card p-3">
-                  <div className="text-sm font-medium">
-                    {index + 1}. {question.question}
-                  </div>
-                  <div className="mt-2 space-y-1">
-                    {question.options.map((option, optionIndex) => (
-                      <div
-                        key={option}
-                        className={cn(
-                          "rounded-md border px-2 py-1.5 text-xs",
-                          optionIndex === question.answerIndex && "border-emerald-500/40 bg-emerald-500/10"
-                        )}
-                      >
-                        {option}
+              {studyArtifact.quiz?.map((question, index) => {
+                const selectedAnswer = quizAnswers[index];
+                const hasAnswered = selectedAnswer !== undefined;
+                const isCorrect = selectedAnswer === question.answerIndex;
+
+                return (
+                  <div key={`${question.question}-${index}`} className="rounded-lg border bg-card p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm font-medium">
+                        {index + 1}. {question.question}
                       </div>
-                    ))}
+                      {hasAnswered && (
+                        <span
+                          className={cn(
+                            "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                            isCorrect
+                              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                              : "bg-destructive/10 text-destructive"
+                          )}
+                        >
+                          {isCorrect ? "Correct" : "Try again"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {question.options.map((option, optionIndex) => {
+                        const isSelected = selectedAnswer === optionIndex;
+                        const isRightAnswer = optionIndex === question.answerIndex;
+                        return (
+                          <button
+                            key={`${option}-${optionIndex}`}
+                            type="button"
+                            onClick={() => setQuizAnswers((current) => ({ ...current, [index]: optionIndex }))}
+                            className={cn(
+                              "flex w-full items-start gap-2 rounded-md border bg-background px-2.5 py-2 text-left text-xs transition-colors hover:border-primary/40 hover:bg-accent/40",
+                              hasAnswered && isRightAnswer && "border-emerald-500/50 bg-emerald-500/10",
+                              hasAnswered && isSelected && !isRightAnswer && "border-destructive/50 bg-destructive/10"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold",
+                                hasAnswered && isRightAnswer && "border-emerald-500 bg-emerald-500 text-white",
+                                hasAnswered && isSelected && !isRightAnswer && "border-destructive bg-destructive text-destructive-foreground"
+                              )}
+                            >
+                              {String.fromCharCode(65 + optionIndex)}
+                            </span>
+                            <span>{option}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {hasAnswered && (
+                      <>
+                        <p className="mt-2 text-xs text-muted-foreground">{question.explanation}</p>
+                        <SourceChips sources={question.sources} />
+                      </>
+                    )}
                   </div>
-                  <p className="mt-2 text-xs text-muted-foreground">{question.explanation}</p>
-                  <SourceChips sources={question.sources} />
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -1631,8 +1794,8 @@ export default function Home() {
                     <h3 className="mt-3 text-balance text-xl font-semibold leading-tight text-white">
                       {activeSlide?.title ?? "Generate slides to begin."}
                     </h3>
-                    <ul className="mt-5 space-y-2.5 text-sm leading-relaxed text-zinc-300">
-                      {(activeSlide?.bullets ?? []).slice(0, 3).map((bullet) => (
+                    <ul className="mt-5 space-y-2 text-sm leading-relaxed text-zinc-300">
+                      {(activeSlide?.bullets ?? []).slice(0, 5).map((bullet) => (
                         <li key={bullet} className="flex gap-2.5">
                           <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
                           <span className="line-clamp-2">{bullet}</span>

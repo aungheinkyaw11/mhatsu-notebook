@@ -10,6 +10,19 @@ const CHAT_MODELS = new Set([
   "gemini-2.5-flash-lite"
 ]);
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Gemini chat generation failed";
+}
+
+function sanitizeGeminiError(error: unknown) {
+  const message = getErrorMessage(error);
+  if (/quota|rate|429/i.test(message)) return "Gemini quota or rate limit was reached. Try again later or use another Gemini key.";
+  if (/api key|permission|unauthorized|forbidden|401|403/i.test(message)) return "Gemini rejected this API key for chat generation.";
+  if (/model|not found|404/i.test(message)) return "The selected Gemini model is not available for this API key.";
+  if (/token|context|too large|payload|request/i.test(message)) return "The selected source excerpts are too large for this Gemini request.";
+  return "Gemini could not generate this answer. Try again or choose Gemini 2.5 Flash.";
+}
+
 export async function POST(request: Request) {
   try {
     const { question, chunks, model } = (await request.json()) as {
@@ -60,54 +73,41 @@ ${question}`;
     const selectedModel = model && CHAT_MODELS.has(model) ? model : "gemini-2.5-flash";
     const config = {
       temperature: 0.2,
-      topP: 0.9
+      topP: 0.9,
+      maxOutputTokens: 1600
     };
 
-    let stream;
+    let lastError: unknown;
     const fallbackModels = [selectedModel, "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(
       (candidate, index, models) => models.indexOf(candidate) === index
     );
 
     for (const candidateModel of fallbackModels) {
       try {
-        stream = await ai.models.generateContentStream({
+        const response = await ai.models.generateContent({
           model: candidateModel,
           contents: prompt,
           config
         });
-        break;
-      } catch {
-        stream = undefined;
-      }
-    }
-
-    if (!stream) {
-      throw new Error("Gemini chat generation failed");
-    }
-
-    const encoder = new TextEncoder();
-    const body = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const chunk of stream) {
-            const text = chunk.text;
-            if (text) controller.enqueue(encoder.encode(text));
+        return new Response(response.text || NO_ANSWER, {
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-cache"
           }
-        } catch {
-          controller.enqueue(encoder.encode(NO_ANSWER));
-        } finally {
-          controller.close();
-        }
+        });
+      } catch (error) {
+        lastError = error;
       }
-    });
+    }
 
-    return new Response(body, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache"
-      }
+    return new Response(sanitizeGeminiError(lastError), {
+      status: 502,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
     });
-  } catch {
-    return new Response(NO_ANSWER, { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  } catch (error) {
+    return new Response(sanitizeGeminiError(error), {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
   }
 }

@@ -84,12 +84,6 @@ main:-webkit-full-screen {
   scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
 }
 
-.brand-mark {
-  background:
-    radial-gradient(circle at 28% 22%, rgba(255, 255, 255, 0.78), transparent 22%),
-    linear-gradient(135deg, hsl(var(--primary)), #10b981);
-}
-
 .wordmark {
   letter-spacing: 0;
   background: linear-gradient(135deg, hsl(var(--foreground)), hsl(var(--primary)));

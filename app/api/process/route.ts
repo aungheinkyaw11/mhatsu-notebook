@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     const extension = file.name.split(".").pop()?.toLowerCase();
     if (!["pdf", "txt"].includes(extension ?? "")) {
       return NextResponse.json(
-        { error: "This file type is not supported yet. Please upload a PDF, TXT, or DOCX file." },
+        { error: "This file type is not supported yet. Please upload a PDF or TXT file." },
         { status: 415 }
       );
     }

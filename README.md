@@ -12,7 +12,7 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-For prototype mode, paste a Gemini API key into the sidebar and click **Test**. The key is held only in React state for the current browser session. It is sent to server routes in an HTTPS request header and is not stored in localStorage, cookies, URLs, or logs.
+For prototype mode, paste a Gemini API key into the sidebar and click **Test**. The key is kept in `sessionStorage` for the current browser session so refreshes do not disconnect the notebook. It is sent to server routes in an HTTPS request header and is not stored in localStorage, cookies, URLs, or logs.
 
 For production mode, set this in `.env.local` or Vercel:
 
@@ -86,7 +86,7 @@ I could not find a confirmed answer in your uploaded sources.
 Prototype mode exists so a user can test MhatSu without provisioning server secrets. It has limitations:
 
 - The key is entered in the browser UI.
-- The key remains only in memory for the current session.
+- The key remains only in browser `sessionStorage` for the current session.
 - The key is sent to Next.js API routes in a request header.
 - The key is never intentionally logged, persisted, or placed in URLs.
 
