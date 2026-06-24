@@ -43,7 +43,6 @@ import "react-pdf/dist/Page/TextLayer.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { buildExcerpt, chunkPages, NO_ANSWER, retrieveChunks, uniqueChunkSources } from "@/lib/rag";
@@ -77,6 +76,12 @@ const prompts = [
   "Compare the uploaded sources",
   "What are the main risks?",
   "Create an executive summary"
+];
+
+const chatModels = [
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash (Fast)" },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro (Deep)" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite (Light)" }
 ];
 
 const studyTools: { type: StudyTool; label: string; icon: typeof Network }[] = [
@@ -154,6 +159,146 @@ function formatDocumentName(name: string) {
     .trim();
 }
 
+const fallbackStopWords = new Set([
+  "what",
+  "which",
+  "where",
+  "when",
+  "why",
+  "how",
+  "that",
+  "this",
+  "these",
+  "those",
+  "about",
+  "paper",
+  "document",
+  "file",
+  "research",
+  "give",
+  "explain",
+  "tell",
+  "please",
+  "the",
+  "and",
+  "for",
+  "with",
+  "from",
+  "your",
+  "uploaded",
+  "source",
+  "sources"
+]);
+
+function questionTerms(question: string) {
+  return question
+    .toLowerCase()
+    .match(/[a-z0-9]+/g)
+    ?.filter((term) => term.length > 2 && !fallbackStopWords.has(term)) ?? [];
+}
+
+function isBoilerplateSentence(line: string) {
+  return /provided proper attribution|google hereby grants permission|@|copyright|all rights reserved|arxiv preprint|proceedings of|conference on|journalistic|scholarly works|^\s*[a-z]+\s+[a-z]+(?:\s+[a-z]+)?\s*(?:\*|google|university)/i.test(
+    line
+  );
+}
+
+function createFallbackSummary(chunks: SourceChunk[], question: string) {
+  const terms = questionTerms(question);
+  const bulletLines = chunks
+    .flatMap((chunk) =>
+      chunk.text
+        .split(/(?<=\.)\s+|(?=\s*[-•]\s+)/)
+        .map((line) => line.replace(/^[-•]\s*/, "").trim())
+        .filter((line) => line.length > 36 && !isBoilerplateSentence(line))
+        .map((line) => {
+          const lower = line.toLowerCase();
+          const score = terms.reduce((total, term) => total + (lower.includes(term) ? 1 : 0), 0);
+          const sourceBoost = /\b(abstract|introduction|conclusion|we propose|we present|we show|experiments|results|task|model|architecture|method|translation|attention|transformer)\b/i.test(
+            line
+          )
+            ? 1
+            : 0;
+          return { line, chunk, score: score + sourceBoost };
+        })
+    )
+    .sort((a, b) => b.score - a.score || a.chunk.pageNumber - b.chunk.pageNumber || a.line.length - b.line.length)
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.line === item.line) === index)
+    .slice(0, 7);
+
+  if (!bulletLines.length) return NO_ANSWER;
+
+  return bulletLines
+    .map(({ line, chunk }) => `- ${line} [${chunk.documentName}, p. ${chunk.pageNumber}]`)
+    .join("\n");
+}
+
+function isOverviewQuestion(question: string) {
+  return /\b(about|overview|summari[sz]e|summary|main idea|main point|paper about|research paper|this paper|this document|this report|this file)\b/i.test(
+    question
+  );
+}
+
+function isDefinitionQuestion(question: string) {
+  return /\b(what is|what's|define|meaning of|explain)\b/i.test(question);
+}
+
+function isReferenceLikeChunk(chunk: SourceChunk) {
+  const text = chunk.text.toLowerCase();
+  const referenceTerms =
+    text.match(
+      /\b(references|arxiv|preprint|proceedings|conference|journal|workshop|transactions|doi|volume|pages|et al|bibliography)\b/g
+    )?.length ?? 0;
+  const citationMarkers = text.match(/\[\d+\]/g)?.length ?? 0;
+  const hasContentHeading = /\b(abstract|introduction|method|approach|model|architecture|experiment|result|conclusion)\b/.test(text);
+
+  return !hasContentHeading && (referenceTerms >= 4 || citationMarkers >= 8);
+}
+
+function uniqueChunks(chunks: SourceChunk[]) {
+  const seen = new Set<string>();
+  return chunks.filter((chunk) => {
+    if (seen.has(chunk.id)) return false;
+    seen.add(chunk.id);
+    return true;
+  });
+}
+
+function selectQuestionChunks(chunks: SourceChunk[], questionEmbedding: number[], question: string) {
+  const nonReferenceChunks = chunks.filter((chunk) => !isReferenceLikeChunk(chunk));
+  const sourceChunks = nonReferenceChunks.length ? nonReferenceChunks : chunks;
+  const overview = isOverviewQuestion(question);
+  const definition = isDefinitionQuestion(question);
+  const terms = questionTerms(question);
+  const termChunks =
+    terms.length > 0
+      ? sourceChunks
+          .map((chunk) => {
+            const text = chunk.text.toLowerCase();
+            const score = terms.reduce((total, term) => total + (text.includes(term) ? 1 : 0), 0);
+            return { chunk, score };
+          })
+          .filter(({ score }) => score > 0)
+          .sort((a, b) => b.score - a.score || a.chunk.pageNumber - b.chunk.pageNumber)
+          .map(({ chunk }) => chunk)
+      : [];
+  const semanticChunks = retrieveChunks(sourceChunks, questionEmbedding, overview ? 12 : 16);
+
+  if (definition) {
+    return uniqueChunks([...termChunks.slice(0, 10), ...semanticChunks]).slice(0, 18);
+  }
+
+  if (!overview) {
+    return semanticChunks.length ? uniqueChunks([...semanticChunks, ...termChunks.slice(0, 6)]).slice(0, 18) : sourceChunks.slice(0, 10);
+  }
+
+  const openingChunks = [...sourceChunks]
+    .sort((a, b) => a.pageNumber - b.pageNumber || a.chunkIndex - b.chunkIndex)
+    .slice(0, 10);
+
+  return uniqueChunks([...openingChunks, ...semanticChunks]).slice(0, 18);
+}
+
 async function createEmbeddings(texts: string[], apiKey: string) {
   const trimmedApiKey = apiKey.trim();
   const embeddings: number[][] = [];
@@ -186,7 +331,6 @@ export default function Home() {
   const [connection, setConnection] = useState<ConnectionStatus>("idle");
   const [query, setQuery] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
-  const [pageInput, setPageInput] = useState("1");
   const [zoom, setZoom] = useState(1);
   const [highlightPage, setHighlightPage] = useState<number | null>(null);
   const [pageNavigationMode, setPageNavigationMode] = useState<"page" | "citation">("page");
@@ -202,6 +346,7 @@ export default function Home() {
   const [isSourceCollapsed, setIsSourceCollapsed] = useState(false);
   const [isReaderFullscreen, setIsReaderFullscreen] = useState(false);
   const [rightPanelMode, setRightPanelMode] = useState<"chat" | "study">("chat");
+  const [chatModel, setChatModel] = useState("gemini-2.5-flash");
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [isFlashcardFlipped, setIsFlashcardFlipped] = useState(false);
   const [mindMapZoom, setMindMapZoom] = useState(1);
@@ -210,6 +355,9 @@ export default function Home() {
   const readerRef = useRef<HTMLDivElement | null>(null);
   const pdfScrollRef = useRef<HTMLDivElement | null>(null);
   const pageRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const pendingPageScrollRef = useRef<{ page: number; mode: "page" | "citation" } | null>(null);
+  const scrollSyncFrameRef = useRef<number | null>(null);
+  const suppressScrollSyncUntilRef = useRef(0);
 
   const selectedDocument = documents.find((document) => document.id === selectedDocumentId) ?? null;
   const selectedIsPdf = Boolean(selectedDocument?.name.toLowerCase().endsWith(".pdf") || selectedDocument?.type.includes("pdf"));
@@ -244,6 +392,10 @@ export default function Home() {
     if (sessionKey) {
       setApiKey(sessionKey);
     }
+    const sessionModel = window.sessionStorage.getItem("mhatsu-chat-model");
+    if (sessionModel && chatModels.some((model) => model.id === sessionModel)) {
+      setChatModel(sessionModel);
+    }
   }, []);
 
   useEffect(() => {
@@ -254,6 +406,10 @@ export default function Home() {
       window.sessionStorage.removeItem("mhatsu-gemini-api-key");
     }
   }, [apiKey]);
+
+  useEffect(() => {
+    window.sessionStorage.setItem("mhatsu-chat-model", chatModel);
+  }, [chatModel]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -281,13 +437,25 @@ export default function Home() {
   }, [studyArtifact?.title, studyArtifact?.type]);
 
   useEffect(() => {
+    return () => {
+      if (scrollSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollSyncFrameRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!selectedDocument) return;
     setPageNumber((current) => Math.min(Math.max(1, current), selectedDocument.pageCount || 1));
   }, [selectedDocument]);
 
   useEffect(() => {
-    setPageInput(String(pageNumber));
-  }, [pageNumber]);
+    pageRefs.current = {};
+    if (!pendingPageScrollRef.current) {
+      pendingPageScrollRef.current = { page: 1, mode: "page" };
+    }
+    pdfScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [selectedDocumentId]);
 
   useEffect(() => {
     if (rightPanelMode !== "study" || studyArtifact?.type !== "flashcards") return;
@@ -415,7 +583,6 @@ export default function Home() {
     setSelectedDocumentId(null);
     setQuery("");
     setPageNumber(1);
-    setPageInput("1");
     setZoom(1);
     setHighlightPage(null);
     setPageNavigationMode("page");
@@ -432,28 +599,12 @@ export default function Home() {
     );
     if (!document) return;
     const nextPage = Math.min(Math.max(1, citation.pageNumber), document.pageCount || citation.pageNumber);
+    pendingPageScrollRef.current = { page: nextPage, mode: "citation" };
     setSelectedDocumentId(document.id);
     setPageNavigationMode("citation");
     setPageNumber(nextPage);
     setHighlightPage(nextPage);
     setMobileTab("reader");
-  };
-
-  const goToPage = (page: number, shouldHighlight = false) => {
-    if (!selectedDocument) return;
-    const nextPage = Math.min(Math.max(1, page), selectedDocument.pageCount || 1);
-    setPageNavigationMode("page");
-    setPageNumber(nextPage);
-    setHighlightPage(shouldHighlight ? nextPage : null);
-  };
-
-  const commitPageInput = () => {
-    const nextPage = Number(pageInput);
-    if (!Number.isFinite(nextPage)) {
-      setPageInput(String(pageNumber));
-      return;
-    }
-    goToPage(nextPage);
   };
 
   const toggleReaderFullscreen = useCallback(async () => {
@@ -492,14 +643,78 @@ export default function Home() {
     }
   }, []);
 
+  const scrollToRenderedPage = useCallback((page: number, mode: "page" | "citation", behavior: ScrollBehavior) => {
+    const container = pdfScrollRef.current;
+    const target =
+      pageRefs.current[page] ??
+      (container?.querySelector(`[data-pdf-page="${page}"]`) as HTMLDivElement | null);
+    if (!container || !target) return false;
+
+    suppressScrollSyncUntilRef.current = Date.now() + 1200;
+    const top =
+      mode === "citation"
+        ? target.offsetTop - container.clientHeight / 2 + target.offsetHeight / 2
+        : target.offsetTop - 24;
+
+    container.scrollTo({ top: Math.max(0, top), behavior });
+
+    window.setTimeout(() => {
+      container.scrollTop = Math.max(0, top);
+    }, behavior === "smooth" ? 260 : 0);
+
+    return true;
+  }, []);
+
+  const syncPageFromScroll = useCallback(() => {
+    if (Date.now() < suppressScrollSyncUntilRef.current) return;
+
+    const container = pdfScrollRef.current;
+    if (!container || !selectedDocument?.pageCount) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const anchor = containerRect.top + Math.min(160, container.clientHeight * 0.28);
+    let nearestPage = pageNumber;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (let page = 1; page <= selectedDocument.pageCount; page += 1) {
+      const node = pageRefs.current[page];
+      if (!node) continue;
+      const rect = node.getBoundingClientRect();
+      const distance = Math.abs(rect.top - anchor);
+      if (rect.bottom >= containerRect.top + 32 && rect.top <= containerRect.bottom - 32 && distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestPage = page;
+      }
+    }
+
+    if (nearestPage !== pageNumber) {
+      setPageNavigationMode("page");
+      setPageNumber(nearestPage);
+      setHighlightPage(null);
+    }
+  }, [pageNumber, selectedDocument?.pageCount]);
+
   useEffect(() => {
-    pdfScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    const pending = pendingPageScrollRef.current;
+    const timers: number[] = [];
+
+    if (pending?.page === pageNumber) {
+      [0, 80, 240, 520].forEach((delay, index) => {
+        const timer = window.setTimeout(() => {
+          const didScroll = scrollToRenderedPage(pending.page, pending.mode, index === 0 ? "smooth" : "auto");
+          if (didScroll && index > 0) pendingPageScrollRef.current = null;
+        }, delay);
+        timers.push(timer);
+      });
+    }
 
     if (highlightPage) {
       const timeout = window.setTimeout(() => setHighlightPage(null), pageNavigationMode === "citation" ? 2600 : 1200);
-      return () => window.clearTimeout(timeout);
+      timers.push(timeout);
     }
-  }, [highlightPage, pageNavigationMode, pageNumber, selectedDocumentId]);
+
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [highlightPage, pageNavigationMode, pageNumber, scrollToRenderedPage, selectedDocumentId]);
 
   const askQuestion = async (question: string) => {
     if (!question.trim() || !canChat) return;
@@ -515,7 +730,14 @@ export default function Home() {
     let retrieved: SourceChunk[] = [];
     try {
       const [questionEmbedding] = await createEmbeddings([question], apiKey);
-      retrieved = retrieveChunks(chunks, questionEmbedding, 8);
+      const searchableChunks =
+        selectedDocumentId && chunks.some((chunk) => chunk.documentId === selectedDocumentId)
+          ? chunks.filter((chunk) => chunk.documentId === selectedDocumentId)
+          : chunks;
+      retrieved =
+        searchableChunks.length <= 20
+          ? searchableChunks
+          : selectQuestionChunks(searchableChunks, questionEmbedding, question);
 
       if (!retrieved.length) {
         setMessages((current) =>
@@ -530,9 +752,10 @@ export default function Home() {
           "Content-Type": "application/json",
           ...(apiKey.trim() ? { "x-gemini-api-key": apiKey.trim() } : {})
         },
-        body: JSON.stringify({ question, chunks: retrieved })
+        body: JSON.stringify({ question, chunks: retrieved, model: chatModel })
       });
 
+      if (!response.ok) throw new Error("Gemini chat generation failed");
       if (!response.body) throw new Error("No response body");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -547,7 +770,13 @@ export default function Home() {
         );
       }
 
-      const verifiedCitations = parseCitations(content, retrieved);
+      const normalizedAnswer = content.replace(/\s+/g, " ").trim();
+      const returnedNoAnswer =
+        normalizedAnswer === NO_ANSWER ||
+        normalizedAnswer.includes(NO_ANSWER) ||
+        /could not find a confirmed answer/i.test(normalizedAnswer);
+      const finalContent = returnedNoAnswer && retrieved.length ? createFallbackSummary(retrieved, question) : content;
+      const verifiedCitations = parseCitations(finalContent, retrieved);
       const fallbackSources = uniqueChunkSources(retrieved).slice(0, 4).map((chunk) => ({
         documentId: chunk.documentId,
         documentName: chunk.documentName,
@@ -558,13 +787,25 @@ export default function Home() {
       setMessages((current) =>
         current.map((message) =>
           message.id === answerId
-            ? { ...message, content: content || NO_ANSWER, citations: verifiedCitations.length ? verifiedCitations : fallbackSources }
+            ? {
+                ...message,
+                content: finalContent || NO_ANSWER,
+                citations: verifiedCitations.length ? verifiedCitations : fallbackSources
+              }
             : message
         )
       );
     } catch {
       setMessages((current) =>
-        current.map((message) => (message.id === answerId ? { ...message, content: NO_ANSWER, citations: [] } : message))
+        current.map((message) =>
+          message.id === answerId
+            ? {
+                ...message,
+                content: "I could not generate an answer from Gemini. Try Gemini 2.5 Flash or check your API quota.",
+                citations: []
+              }
+            : message
+        )
       );
     } finally {
       setIsAnswering(false);
@@ -597,11 +838,13 @@ export default function Home() {
           "Content-Type": "application/json",
           ...(apiKey.trim() ? { "x-gemini-api-key": apiKey.trim() } : {})
         },
-        body: JSON.stringify({ type, chunks: studyChunks })
+        body: JSON.stringify({ type, chunks: studyChunks, model: chatModel })
       });
 
-      if (!response.ok) throw new Error("Could not generate study material");
-      const artifact = (await response.json()) as StudyArtifact;
+      const artifact = (await response.json().catch(() => null)) as (StudyArtifact & { error?: string }) | null;
+      if (!response.ok || !artifact) {
+        throw new Error(artifact?.error ?? "Could not generate study material");
+      }
       setStudyArtifact(artifact);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not generate study material");
@@ -823,42 +1066,6 @@ export default function Home() {
               <div className="text-xs text-muted-foreground">Focused reader</div>
             </div>
             <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1 rounded-lg border bg-background/70 px-1 py-1">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => goToPage(pageNumber - 1)}
-                disabled={pageNumber <= 1}
-                aria-label="Previous page"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <Input
-                value={pageInput}
-                inputMode="numeric"
-                onChange={(event) => setPageInput(event.target.value.replace(/[^\d]/g, ""))}
-                onBlur={commitPageInput}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.currentTarget.blur();
-                    commitPageInput();
-                  }
-                }}
-                className="h-8 w-14 border-0 bg-card text-center shadow-none focus-visible:ring-1"
-                aria-label="Current page"
-              />
-              <span className="min-w-10 px-1 text-xs text-muted-foreground">of {selectedDocument.pageCount || "?"}</span>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => goToPage(pageNumber + 1)}
-                disabled={pageNumber >= (selectedDocument.pageCount || 1)}
-                aria-label="Next page"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-              </div>
-              <Separator orientation="vertical" className="mx-2 h-6" />
               <Button variant="ghost" size="icon-sm" onClick={() => setZoom((current) => Math.max(0.6, current - 0.1))}>
                 <ZoomOut className="h-4 w-4" />
               </Button>
@@ -885,41 +1092,18 @@ export default function Home() {
             </div>
           </div>
           <div className="flex min-h-0 flex-1">
-            {selectedIsPdf && selectedDocument.pageCount > 1 && (
-              <aside className="hidden w-28 shrink-0 border-r bg-card/60 px-2 py-3 lg:block">
-                <ScrollArea className="h-full app-scrollbar">
-                  <Document
-                    key={`${selectedDocument.id}-thumbs`}
-                    file={selectedDocument.objectUrl}
-                    loading={null}
-                    error={null}
-                  >
-                    <div className="space-y-2 pb-2">
-                      {Array.from({ length: selectedDocument.pageCount }, (_, index) => {
-                        const page = index + 1;
-                        return (
-                          <button
-                            key={page}
-                            onClick={() => goToPage(page, true)}
-                            className={cn(
-                              "w-full rounded-md border bg-background p-1 text-left shadow-sm transition-colors hover:border-primary/50",
-                              pageNumber === page && "border-primary bg-accent"
-                            )}
-                          >
-                            <div className="overflow-hidden rounded-sm bg-white dark:bg-neutral-100">
-                              <Page pageNumber={page} width={72} renderTextLayer={false} renderAnnotationLayer={false} />
-                            </div>
-                            <div className="mt-1 text-center text-[11px] text-muted-foreground">{page}</div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </Document>
-                </ScrollArea>
-              </aside>
-            )}
-            <div ref={pdfScrollRef} className="flex-1 overflow-y-auto app-scrollbar reader-rhythm">
-              <div className="mx-auto flex max-w-5xl flex-col items-center gap-7 px-6 py-8">
+            <div
+              ref={pdfScrollRef}
+              className="flex-1 overflow-y-auto app-scrollbar reader-rhythm"
+              onScroll={() => {
+                if (scrollSyncFrameRef.current !== null) return;
+                scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+                  scrollSyncFrameRef.current = null;
+                  syncPageFromScroll();
+                });
+              }}
+            >
+              <div className="relative mx-auto flex max-w-5xl flex-col items-center gap-7 px-6 py-8">
               {selectedIsPdf ? (
                 <Document
                   key={selectedDocument.id}
@@ -936,18 +1120,24 @@ export default function Home() {
                     }
                   }}
                 >
-                  <div
-                    key={`${selectedDocument.id}-${pageNumber}-${zoom}`}
-                    ref={(node) => {
-                      pageRefs.current[pageNumber] = node;
-                    }}
-                    className={cn(
-                      "pdf-page rounded-sm bg-white p-4 shadow-soft ring-1 ring-black/5 transition-all dark:bg-neutral-100",
-                      highlightPage === pageNumber && "ring-4 ring-primary/45"
-                    )}
-                  >
-                    <Page pageNumber={pageNumber} scale={zoom} width={720} />
-                  </div>
+                  {Array.from({ length: selectedDocument.pageCount || 1 }, (_, index) => {
+                    const page = index + 1;
+                    return (
+                      <div
+                        key={`${selectedDocument.id}-${page}-${zoom}`}
+                        data-pdf-page={page}
+                        ref={(node) => {
+                          pageRefs.current[page] = node;
+                        }}
+                        className={cn(
+                          "pdf-page scroll-mt-6 rounded-sm bg-white p-4 shadow-soft ring-1 ring-black/5 transition-all dark:bg-neutral-100",
+                          highlightPage === page && "ring-4 ring-primary/45"
+                        )}
+                      >
+                        <Page pageNumber={page} scale={zoom} width={720} />
+                      </div>
+                    );
+                  })}
                 </Document>
               ) : (
                 <div
@@ -1026,26 +1216,40 @@ export default function Home() {
     });
   };
 
-  const SourceChips = ({ sources }: { sources: StudySource[] }) => (
-    <div className="mt-3 flex flex-wrap gap-1.5">
-      {sources.slice(0, 3).map((source) => (
-        <button
-          key={`${source.documentName}-${source.pageNumber}-${source.excerpt.slice(0, 12)}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            jumpToCitation(source);
-          }}
-          title={`${formatDocumentName(source.documentName)}, page ${source.pageNumber}`}
-          className="max-w-full rounded-md border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:text-primary"
-        >
-          <span className="inline-flex max-w-full items-center gap-1">
-            <span className="truncate">{formatDocumentName(source.documentName)}</span>
-            <span className="shrink-0">p. {source.pageNumber}</span>
-          </span>
-        </button>
-      ))}
-    </div>
-  );
+  const SourceChips = ({ sources }: { sources: Array<Partial<StudySource> & Partial<Citation>> }) => {
+    const validSources = sources
+      .filter((source) => source.documentName && Number.isFinite(Number(source.pageNumber)))
+      .slice(0, 3)
+      .map((source) => ({
+        documentId: source.documentId,
+        documentName: source.documentName ?? "",
+        pageNumber: Number(source.pageNumber),
+        excerpt: source.excerpt ?? ""
+      }));
+
+    if (!validSources.length) return null;
+
+    return (
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {validSources.map((source, index) => (
+          <button
+            key={`${source.documentName}-${source.pageNumber}-${source.excerpt.slice(0, 12)}-${index}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              jumpToCitation(source);
+            }}
+            title={`${formatDocumentName(source.documentName)}, page ${source.pageNumber}`}
+            className="max-w-full rounded-md border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:text-primary"
+          >
+            <span className="inline-flex max-w-full items-center gap-1">
+              <span className="truncate">{formatDocumentName(source.documentName)}</span>
+              <span className="shrink-0">p. {source.pageNumber}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  };
 
   const moveFlashcard = (direction: number) => {
     if (!flashcards.length) return;
@@ -1494,12 +1698,43 @@ export default function Home() {
   const chatPanel = (
     <section className="flex h-full min-h-0 flex-col border-l bg-card/80 backdrop-blur-xl">
       <div className="border-b px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
+        <div className="space-y-3">
+          <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
             <h2 className="text-sm font-semibold">Ask MhatSu</h2>
             <p className="mt-1 text-xs text-muted-foreground">Answers are based only on your uploaded sources</p>
           </div>
           <ConnectionIndicator status={connection} compact />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="sr-only" htmlFor="header-chat-model">
+              Gemini model
+            </label>
+            <select
+              id="header-chat-model"
+              value={chatModel}
+              onChange={(event) => setChatModel(event.target.value)}
+              className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs text-foreground shadow-sm outline-none transition-colors focus:border-primary"
+              disabled={isAnswering}
+            >
+              {chatModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+            <div
+              className={cn(
+                "flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-medium",
+                connection === "connected"
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  : "border-border bg-background text-muted-foreground"
+              )}
+            >
+              <ConnectionIndicator status={connection} compact />
+              <span className="hidden sm:inline">{connection === "connected" ? "API Connected" : connectionCopy(connection)}</span>
+            </div>
+          </div>
         </div>
         <div className="mt-4 grid grid-cols-2 rounded-lg bg-muted p-1">
           <button
@@ -1601,7 +1836,7 @@ export default function Home() {
 
       {rightPanelMode === "chat" && (
       <div className="border-t p-4">
-        <div className="mb-3 flex justify-between">
+        <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Bot className="h-3.5 w-3.5" />
             Grounded chat

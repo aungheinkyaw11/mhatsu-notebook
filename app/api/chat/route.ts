@@ -4,11 +4,18 @@ import type { SourceChunk } from "@/lib/types";
 
 export const runtime = "nodejs";
 
+const CHAT_MODELS = new Set([
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash-lite"
+]);
+
 export async function POST(request: Request) {
   try {
-    const { question, chunks } = (await request.json()) as {
+    const { question, chunks, model } = (await request.json()) as {
       question?: string;
       chunks?: SourceChunk[];
+      model?: string;
     };
 
     if (!question?.trim()) {
@@ -26,9 +33,20 @@ export async function POST(request: Request) {
       )
       .join("\n\n");
 
-    const prompt = `You are MhatSu, a document research assistant. Answer only using the supplied source excerpts. Every factual statement must be supported by a citation containing document name and page number. If the answer is not present in the source excerpts, say: '${NO_ANSWER}' Never invent citations or page numbers.
+    const prompt = `You are MhatSu, a document research assistant similar to NotebookLM. Your job is to answer the user's question using the uploaded document excerpts below.
 
-Use this citation format inline: [Document Name, p. 12]
+Rules:
+- Answer only from the supplied excerpts.
+- If the question is related to the uploaded document, answer it even when the user's wording is informal or uses pronouns like "he", "she", "they", "this week", or "this report".
+- The user's exact words do not need to appear in the source. Use the meaning of the question.
+- If the user asks what a paper, report, or document is about, prioritize abstract, introduction, methods, results, conclusion, and overview excerpts. Do not answer from bibliography/reference-list entries unless the user specifically asks about references.
+- If the user asks "what is X" or asks for a definition, define X in the context of the excerpts first, then add concise bullets for evidence, benchmarks, methods, or implications found in the excerpts.
+- For summary questions, synthesize the relevant actions, tasks, decisions, risks, or findings from the excerpts.
+- If the excerpts are a weekly report, status update, meeting note, resume, or task list, summarize the listed work items and outcomes.
+- Every factual bullet or sentence should include a citation in this format: [Document Name, p. 12]
+- If and only if the supplied excerpts contain no relevant information, say exactly: '${NO_ANSWER}'
+- Never invent facts, citations, document names, or page numbers.
+
 Do not include a Sources section; the application will render verified sources separately.
 
 Source excerpts:
@@ -39,14 +57,33 @@ ${question}`;
 
     const apiKey = getRequestApiKey(request);
     const ai = getGeminiClient(apiKey);
-    const stream = await ai.models.generateContentStream({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.15,
-        topP: 0.8
+    const selectedModel = model && CHAT_MODELS.has(model) ? model : "gemini-2.5-flash";
+    const config = {
+      temperature: 0.2,
+      topP: 0.9
+    };
+
+    let stream;
+    const fallbackModels = [selectedModel, "gemini-2.5-flash", "gemini-2.5-flash-lite"].filter(
+      (candidate, index, models) => models.indexOf(candidate) === index
+    );
+
+    for (const candidateModel of fallbackModels) {
+      try {
+        stream = await ai.models.generateContentStream({
+          model: candidateModel,
+          contents: prompt,
+          config
+        });
+        break;
+      } catch {
+        stream = undefined;
       }
-    });
+    }
+
+    if (!stream) {
+      throw new Error("Gemini chat generation failed");
+    }
 
     const encoder = new TextEncoder();
     const body = new ReadableStream({
