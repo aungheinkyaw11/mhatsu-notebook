@@ -62,7 +62,7 @@ export async function POST(request: Request) {
         maxOutputTokens: 8
       }
     });
-    await embedText("MhatSu embedding connection test", apiKey);
+    await embedText("HmatSu embedding connection test", apiKey);
 
     return NextResponse.json({ ok: true });
   } catch (error) {

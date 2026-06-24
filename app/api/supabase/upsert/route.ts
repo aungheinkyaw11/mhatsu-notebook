@@ -24,7 +24,7 @@ export async function POST(request: Request) {
       embedding: chunk.embedding
     }));
 
-    const { error } = await supabase.from("mhatsu_chunks").upsert(rows);
+    const { error } = await supabase.from("hmatsu_chunks").upsert(rows);
     if (error) throw error;
 
     return NextResponse.json({ ok: true, count: rows.length });

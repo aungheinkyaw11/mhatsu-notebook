@@ -216,7 +216,7 @@ function fallbackArtifact(type: StudyTool, chunks: SourceChunk[]): StudyArtifact
           flashcards: usableEntries.slice(0, 10).map((entry, index) => ({
             front:
               entry.text === NO_ANSWER
-                ? "What could MhatSu confirm from this source?"
+                ? "What could HmatSu confirm from this source?"
                 : `What does the source say about ${questionSubject(entry.text, `topic ${index + 1}`)}?`,
             back: entry.text,
             sources: entry.chunk ? [sourceFromChunk(entry.chunk)] : sources
@@ -404,7 +404,7 @@ export async function POST(request: Request) {
       )
       .join("\n\n");
 
-    const prompt = `You are MhatSu, a document study assistant. Use only the supplied source excerpts.
+    const prompt = `You are HmatSu, a document study assistant. Use only the supplied source excerpts.
 The excerpts are selected across the uploaded document so the output should cover the full source, not only the first page.
 If the source excerpts do not contain enough information, set summary to exactly "${NO_ANSWER}" and return empty arrays for generated items.
 Never use general knowledge. Never invent facts, document names, page numbers, or sources.

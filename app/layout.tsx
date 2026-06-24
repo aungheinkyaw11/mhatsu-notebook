@@ -3,8 +3,11 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 
 export const metadata: Metadata = {
-  title: "MhatSu",
-  description: "Source-grounded AI document research with Gemini."
+  title: "HmatSu",
+  description: "Source-grounded AI document research with Gemini.",
+  icons: {
+    icon: "/favicon.svg"
+  }
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -1,5 +1,7 @@
 # dependencies
 node_modules/
+.pnp
+.pnp.*
 
 # Next.js
 .next/
@@ -11,9 +13,8 @@ build/
 coverage/
 
 # local env files
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
 
 # Vercel
 .vercel/
@@ -30,6 +31,8 @@ pnpm-debug.log*
 
 # OS/editor
 .DS_Store
+.AppleDouble
+.LSOverride
 .idea/
 .vscode/
 

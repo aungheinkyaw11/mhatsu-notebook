@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     if (!question) return NextResponse.json({ error: "Question is required" }, { status: 400 });
 
     const embedding = await embedText(question, getRequestApiKey(request));
-    const { data, error } = await supabase.rpc("match_mhatsu_chunks", {
+    const { data, error } = await supabase.rpc("match_hmatsu_chunks", {
       query_embedding: embedding,
       match_count: 8,
       match_threshold: 0.15

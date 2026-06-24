@@ -1,6 +1,110 @@
-# MhatSu
+# HmatSu
 
-MhatSu is a polished NotebookLM-style AI document research app built with Next.js, TypeScript, Tailwind CSS, shadcn-style UI primitives, Lucide icons, React PDF/PDF.js, Gemini 2.5 Flash, and a pgvector-ready retrieval layer.
+HmatSu is an AI-powered research and document assistant that turns uploaded PDFs or text files into a grounded study workspace. It combines a focused document reader, source-cited chat, and Gemini-powered study tools so users can understand long documents faster without losing track of evidence.
+
+Built for the Google Build with AI workshop submission, HmatSu focuses on one practical workflow: upload a source, ask questions, verify citations, and generate learning artifacts such as mind maps, flashcards, quizzes, and slide outlines.
+
+## Demo Highlights
+
+![HmatSu grounded chat with citations](public/screenshots/chat-citations.png)
+
+## What HmatSu Does
+
+- Upload PDFs or TXT files and extract page-level text.
+- Read documents inside a focused PDF viewer with zoom, fullscreen, and page navigation.
+- Ask grounded questions using Gemini, with answers based only on retrieved source chunks.
+- Show clickable citations that jump back to the matching document page.
+- Generate study artifacts from uploaded sources:
+  - Mind maps for concept relationships
+  - Flashcards for active recall
+  - Quizzes for self-testing
+  - Slide outlines for presentation preparation
+- Support light and dark mode with a responsive three-panel interface.
+- Run immediately in prototype mode with a user-provided Gemini API key.
+- Optionally persist embeddings with Supabase pgvector for production-style retrieval.
+
+## Study Tools
+
+### Quiz
+
+HmatSu generates multiple-choice questions from selected source chunks and marks correct answers with source references.
+
+![HmatSu quiz generation](public/screenshots/quiz.png)
+
+### Flashcards
+
+Flashcards help turn dense research material into active recall prompts with source chips.
+
+![HmatSu flashcards](public/screenshots/flashcards.png)
+
+### Mind Map
+
+The mind map view organizes important ideas and relationships from the document into an interactive visual structure.
+
+![HmatSu mind map](public/screenshots/mindmap.png)
+
+### Slides
+
+The slides tool creates a presentation-ready outline from the uploaded source material, helping users move from reading to explaining.
+
+## AI Workflow
+
+1. The user uploads a PDF or TXT file.
+2. HmatSu extracts text page by page with PDF.js.
+3. The app chunks the extracted text and stores document metadata:
+   - `documentId`
+   - `documentName`
+   - `pageNumber`
+   - `chunkIndex`
+   - `text`
+   - `embedding`
+4. Gemini embeddings are created for document chunks and user questions.
+5. HmatSu retrieves the most relevant chunks with cosine similarity.
+6. Gemini 2.5 generates answers or study artifacts using only retrieved excerpts.
+7. The UI verifies citations against chunk metadata before making them clickable.
+
+If no relevant source is found, the assistant replies:
+
+```text
+I could not find a confirmed answer in your uploaded sources.
+```
+
+## Judging Criteria Fit
+
+### Functionality & Accuracy
+
+HmatSu is source-grounded by design. Chat answers and study artifacts are generated from retrieved document chunks, and citations are tied back to page-level metadata so users can verify claims.
+
+### Innovation & User Experience
+
+The app is not only a chatbot. It turns one uploaded document into multiple learning and research modes: cited chat, reader, mind map, flashcards, quiz, and slides. The interface is designed as a practical research desk rather than a landing page.
+
+### Technical Implementation
+
+HmatSu uses a full Next.js application architecture with API routes, PDF processing, embeddings, retrieval, structured Gemini outputs, optional Supabase pgvector persistence, dark mode, responsive layouts, and Vercel-ready deployment.
+
+## Tech Stack
+
+- Next.js App Router
+- TypeScript
+- Tailwind CSS
+- shadcn-style UI primitives
+- Lucide icons
+- React PDF and PDF.js
+- Gemini 2.5 Flash / Gemini 2.5 Pro / Gemini 2.5 Flash-Lite
+- Gemini embeddings
+- Supabase pgvector support
+- Vercel deployment
+
+## Architecture
+
+- `app/page.tsx`: full-screen workspace, uploads, PDF reader, chat, study tools, citations, dark mode, and responsive mobile tabs.
+- `app/api/process`: extracts PDF text page by page with PDF.js.
+- `app/api/embeddings`: creates Gemini embeddings for chunks and questions.
+- `app/api/chat`: generates grounded Gemini answers from retrieved excerpts.
+- `app/api/study`: generates mind maps, flashcards, quizzes, and slide outlines from selected source chunks.
+- `app/api/supabase/upsert`: stores chunk vectors in Supabase pgvector when configured.
+- `lib/rag.ts`: chunking, cosine similarity, retrieval, excerpt creation, and fallback handling.
 
 ## Local Setup
 
@@ -27,63 +131,26 @@ NEXT_PUBLIC_SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Run `supabase/schema.sql` in Supabase SQL Editor to create the `mhatsu_chunks` pgvector table and match function.
+Run `supabase/schema.sql` in Supabase SQL Editor to create the `hmatsu_chunks` pgvector table and match function.
 
 ## Vercel Deployment
 
-1. Push this project to GitHub.
-2. Import it in Vercel.
-3. Add `GEMINI_API_KEY` as a Production environment variable.
-4. Optionally add `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-5. Deploy.
+See [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md) for the full step-by-step deployment checklist.
+
+Quick settings:
+
+- Framework Preset: `Next.js`
+- Install Command: `npm install`
+- Build Command: `npm run build`
+- Output Directory: leave empty / Next.js default
+- Production environment variable: `GEMINI_API_KEY`
+- Optional environment variables: `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 
 The app uses standard Next.js API routes and is Vercel-ready without custom server configuration.
 
-## Architecture
-
-- `app/page.tsx`: full-screen three-panel workspace, uploads, PDF reader, chat, citations, dark mode, and responsive mobile tabs.
-- `app/api/process`: extracts PDF text page by page with PDF.js.
-- `app/api/embeddings`: creates Gemini embeddings for chunks and questions.
-- `app/api/chat`: streams Gemini 2.5 Flash answers using only retrieved excerpts.
-- `app/api/study`: generates grounded mind maps, flashcards, quizzes, and slide outlines from selected source chunks.
-- `app/api/supabase/upsert`: stores chunk vectors in Supabase pgvector when configured.
-- `lib/rag.ts`: chunking, cosine similarity, retrieval, excerpt creation, and no-answer constant.
-
-The MVP keeps an in-memory session vector store in the browser so it works immediately in prototype mode. Supabase pgvector support is included for production persistence and server-side retrieval.
-
-## Study Tools
-
-The right panel includes grounded study tools for the selected document:
-
-- Mind map
-- Flashcards
-- Quiz
-- Slides
-
-Each tool sends only indexed document chunks to Gemini 2.5 Flash and asks for structured JSON. The UI renders each artifact with source chips that navigate back to the cited document page.
-
-## Citation Generation
-
-MhatSu extracts text page by page, chunks each page, and stores metadata with every chunk:
-
-- `documentId`
-- `documentName`
-- `pageNumber`
-- `chunkIndex`
-- `text`
-- `embedding`
-
-When a question is asked, MhatSu embeds the question, retrieves relevant stored chunks, and sends only those excerpts to Gemini. Gemini is instructed to cite answers using `[Document Name, p. 12]`. The UI then verifies citations against retrieved chunk metadata before making them clickable and before showing the Sources section. Clicking a citation opens the matching PDF page and highlights it.
-
-If no relevant source is found, the assistant replies exactly:
-
-```text
-I could not find a confirmed answer in your uploaded sources.
-```
-
 ## Prototype API Key Security
 
-Prototype mode exists so a user can test MhatSu without provisioning server secrets. It has limitations:
+Prototype mode exists so a user can test HmatSu without provisioning server secrets. It has limitations:
 
 - The key is entered in the browser UI.
 - The key remains only in browser `sessionStorage` for the current session.

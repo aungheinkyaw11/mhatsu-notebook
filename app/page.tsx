@@ -67,10 +67,7 @@ type FullscreenTarget = HTMLElement & {
 };
 
 if (typeof window !== "undefined") {
-  pdfjs.GlobalWorkerOptions.workerPort = new Worker(
-    new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url),
-    { type: "module" }
-  );
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker-4.8.69.min.mjs";
 }
 
 const prompts = [
@@ -120,6 +117,15 @@ function ConnectionIndicator({ status, compact = false }: { status: ConnectionSt
         )}
       />
       {!compact && <span>{connectionCopy(status)}</span>}
+    </div>
+  );
+}
+
+function LogoMark({ className }: { className?: string }) {
+  return (
+    <div className={cn("flex items-center justify-center overflow-hidden rounded-lg border bg-white shadow-sm dark:bg-black", className)}>
+      <img src="/hmatsu-logo-light.svg" alt="HmatSu" className="block h-full w-full object-contain dark:hidden" />
+      <img src="/hmatsu-logo-dark.svg" alt="" aria-hidden="true" className="hidden h-full w-full object-contain dark:block" />
     </div>
   );
 }
@@ -390,7 +396,7 @@ export default function Home() {
     !trimmedApiKey || trimmedApiKey.startsWith("AIza") || trimmedApiKey.startsWith("AQ.");
   const keyStatusText = apiKey.trim()
     ? "Prototype key saved for this browser session."
-    : "No UI key. MhatSu will use server GEMINI_API_KEY if configured.";
+    : "No UI key. HmatSu will use server GEMINI_API_KEY if configured.";
   const emptyChatReason = !documents.length
     ? "No sources yet. Upload a PDF to start asking questions."
     : connection !== "connected"
@@ -399,11 +405,11 @@ export default function Home() {
 
   useEffect(() => {
     setIsThemeMounted(true);
-    const sessionKey = window.sessionStorage.getItem("mhatsu-gemini-api-key");
+    const sessionKey = window.sessionStorage.getItem("hmatsu-gemini-api-key");
     if (sessionKey) {
       setApiKey(sessionKey);
     }
-    const sessionModel = window.sessionStorage.getItem("mhatsu-chat-model");
+    const sessionModel = window.sessionStorage.getItem("hmatsu-chat-model");
     if (sessionModel && chatModels.some((model) => model.id === sessionModel)) {
       setChatModel(sessionModel);
     }
@@ -412,14 +418,14 @@ export default function Home() {
   useEffect(() => {
     const trimmedApiKey = apiKey.trim();
     if (trimmedApiKey) {
-      window.sessionStorage.setItem("mhatsu-gemini-api-key", trimmedApiKey);
+      window.sessionStorage.setItem("hmatsu-gemini-api-key", trimmedApiKey);
     } else {
-      window.sessionStorage.removeItem("mhatsu-gemini-api-key");
+      window.sessionStorage.removeItem("hmatsu-gemini-api-key");
     }
   }, [apiKey]);
 
   useEffect(() => {
-    window.sessionStorage.setItem("mhatsu-chat-model", chatModel);
+    window.sessionStorage.setItem("hmatsu-chat-model", chatModel);
   }, [chatModel]);
 
   useEffect(() => {
@@ -860,11 +866,9 @@ export default function Home() {
     <aside className="flex h-full min-h-0 flex-col border-r bg-card/80 backdrop-blur-xl">
       <div className="flex items-center justify-between px-5 py-4">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border bg-white shadow-sm">
-            <img src="/mhatsu-logo.png" alt="MhatSu" className="h-full w-full object-cover" />
-          </div>
+          <LogoMark className="h-10 w-10" />
           <div>
-            <div className="wordmark text-base font-semibold tracking-tight">MhatSu</div>
+            <div className="wordmark text-base font-semibold tracking-tight">HmatSu</div>
             <div className="text-xs text-muted-foreground">Source intelligence</div>
           </div>
         </div>
@@ -1042,9 +1046,7 @@ export default function Home() {
       <Button variant="ghost" size="icon-sm" onClick={() => setIsSourceCollapsed(false)} aria-label="Show sources">
         <PanelLeft className="h-4 w-4 rotate-180" />
       </Button>
-      <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-lg border bg-white shadow-sm">
-        <img src="/mhatsu-logo.png" alt="MhatSu" className="h-full w-full object-cover" />
-      </div>
+      <LogoMark className="h-9 w-9" />
       <div className="h-px w-8 bg-border" />
       <div className="text-xs font-medium text-muted-foreground [writing-mode:vertical-rl]">Sources</div>
     </aside>
@@ -1864,7 +1866,7 @@ export default function Home() {
         <div className="space-y-3">
           <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold">Ask MhatSu</h2>
+            <h2 className="text-sm font-semibold">Ask HmatSu</h2>
             <p className="mt-1 text-xs text-muted-foreground">Answers are based only on your uploaded sources</p>
           </div>
           <ConnectionIndicator status={connection} compact />

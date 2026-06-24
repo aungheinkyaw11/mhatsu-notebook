@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       )
       .join("\n\n");
 
-    const prompt = `You are MhatSu, a document research assistant similar to NotebookLM. Your job is to answer the user's question using the uploaded document excerpts below.
+    const prompt = `You are HmatSu, a document research assistant similar to NotebookLM. Your job is to answer the user's question using the uploaded document excerpts below.
 
 Rules:
 - Answer only from the supplied excerpts.
