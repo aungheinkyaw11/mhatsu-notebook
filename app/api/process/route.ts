@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
 import type { PageText } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -27,9 +25,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ pageCount: 1, pages: [{ pageNumber: 1, text }] satisfies PageText[] });
     }
 
+    await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-    const workerPath = path.join(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs");
-    pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
     const data = new Uint8Array(await file.arrayBuffer());
     const pdf = await pdfjs.getDocument({ data }).promise;
     const pages: PageText[] = [];
